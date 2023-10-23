@@ -236,7 +236,6 @@
 	tx_delay = <0x36>;
 	rx_delay = <0x2c>;
 	phy-handle = <&rgmii_phy0>;
-	phy-supply = <&vcc_3v3_mainboard>;
 	status = "okay";
 };
 
@@ -258,7 +257,6 @@
 	tx_delay = <0x44>;
 	rx_delay = <0x28>;
 	phy-handle = <&rgmii_phy1>;
-	phy-supply = <&vcc_3v3_mainboard>;
 	status = "okay";
 };
 
@@ -271,7 +269,7 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&fusb0_int>;
 		vbus-supply = <&vbus_typec>;
-		status = "okay";
+		status = "disabled";
 
 		usb_con: connector {
 			compatible = "usb-c-connector";
@@ -291,6 +289,7 @@
 &mdio0 {
 	rgmii_phy0: ethernet-phy@1 {
 		compatible = "ethernet-phy-ieee802.3-c22";
+		phy-supply = <&vcc_3v3_mainboard>;
 		reg = <0x1>;
 	};
 };
@@ -298,6 +297,7 @@
 &mdio1 {
 	rgmii_phy1: ethernet-phy@1 {
 		compatible = "ethernet-phy-ieee802.3-c22";
+		phy-supply = <&vcc_3v3_mainboard>;
 		reg = <0x1>;
 	};
 };
@@ -337,7 +337,7 @@
 
 &pwm3 {
 	compatible = "rockchip,remotectl-pwm";
-	pinctrl-names = "active";
+	pinctrl-names = "default";
 	pinctrl-0 = <&pwm3_pins>;
 	remote_pwm_id = <3>;
 	handle_cpu_id = <1>;
@@ -355,11 +355,16 @@
 			<0x2d	KEY_DOWN>,
 			<0x66	KEY_LEFT>,
 			<0x3e	KEY_RIGHT>,
+			<0x31	0x161>, //KEY_CENTER
 			<0x77	KEY_HOME>,
 			<0x7f	KEY_VOLUMEUP>,
 			<0x7e	KEY_VOLUMEDOWN>,
 			<0x23	KEY_POWER>,
 			<0x7d	KEY_MENU>,
+			<0x7a	0x192>, //KEY_CHANNELUP
+			<0x79	0x193>, //KEY_CHANNELDOWN
+			<0x72	0x96>, //KEY_EXPLORER (SETTING)
+			<0xf	KEY_SEARCH>, //KEY_SEARCH 'M'
 			<0x6d	KEY_1>,
 			<0x6c	KEY_2>,
 			<0x33	KEY_3>,
@@ -369,22 +374,19 @@
 			<0x75	KEY_7>,
 			<0x74	KEY_8>,
 			<0x3b	KEY_9>,
-			<0x78	KEY_0>;
+			<0x78	KEY_0>,
+			<0x2f	KEY_NUMERIC_STAR>,  /* * key */
+			<0x25	KEY_NUMERIC_POUND>; /* # key */
 	};
 };
 
 &pwm7 {
 	pinctrl-0 = <&pwm7_pins>;
-	pinctrl-names = "active";
+	pinctrl-names = "default";
 	status = "okay";
 };
 
 &pinctrl {
-	backlight {
-		backlight_led_pin: backlight-led-pin {
-			rockchip,pins = <3 RK_PA2 RK_FUNC_GPIO &pcfg_pull_none>;
-		};
-	};
 
 	leds {
 		sys_led_pin: sys-led-pin {
@@ -397,8 +399,24 @@
 	};
 
 	lcd_display {
+		backlight_led_pin: backlight-led-pin {
+			rockchip,pins = <3 RK_PA2 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		spi3_sck: spi3-sck {
+			rockchip,pins = <4 RK_PC2 2 &pcfg_pull_up_drv_level_1>;
+		};
+
+		spi3_mosi: spi3-mosi {
+			rockchip,pins = <4 RK_PC3 2 &pcfg_pull_up_drv_level_1>;
+		};
+
 		lcd_reset_pin: lcd-reset-pin {
-			rockchip,pins = <4 RK_PC4 RK_FUNC_GPIO &pcfg_pull_up>;
+			rockchip,pins = <4 RK_PC4 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		lcd_dc_pin: display_dc_pin {
+			rockchip,pins = <4 RK_PC5 RK_FUNC_GPIO &pcfg_pull_up_drv_level_1>;
 		};
 	};
 
@@ -446,19 +464,19 @@
 };
 
 &spi3 {
-	pinctrl-names = "default", "high_speed";
-	pinctrl-0 = <&spi3m1_cs0 &spi3m1_pins>;
-	pinctrl-1 = <&spi3m1_cs0 &spi3m1_pins_hs>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi3m1_cs0_hs &spi3_sck &spi3_mosi>;
 	status = "okay";
 
 	lcd_display: lcd-display@0 {
-		reg = <0>;
 		compatible = "sitronix,st7735r";
-		pinctrl-names = "default";
-		pinctrl-0 = <&lcd_reset_pin>;
+		reg = <0>;
+		spi-max-frequency = <50000000>;
 		rotate = <0>;
 		dc-gpios = <&gpio4 RK_PC5 GPIO_ACTIVE_HIGH>;
 		reset-gpios = <&gpio4 RK_PC4 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&lcd_dc_pin &lcd_reset_pin>;
 		backlight = <&backlight>;
 		buswidth = <8>;
 		debug = <0x0>;
