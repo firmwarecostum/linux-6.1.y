@@ -195,6 +195,7 @@ static const struct mtk_reg_map mt7988_reg_map = {
 	.wdma_base = {
 		[0]		= 0x4800,
 		[1]		= 0x4c00,
+		[2]		= 0x5000,
 	},
 	.pse_iq_sta		= 0x0180,
 	.pse_oq_sta		= 0x01a0,
@@ -3304,8 +3305,8 @@ static irqreturn_t mtk_handle_irq_rx(int irq, void *_eth)
 
 	eth->rx_events++;
 	if (likely(napi_schedule_prep(&eth->rx_napi))) {
-		mtk_rx_irq_disable(eth, eth->soc->txrx.rx_irq_done_mask);
 		__napi_schedule(&eth->rx_napi);
+		mtk_rx_irq_disable(eth, eth->soc->txrx.rx_irq_done_mask);
 	}
 
 	return IRQ_HANDLED;
@@ -3317,8 +3318,8 @@ static irqreturn_t mtk_handle_irq_tx(int irq, void *_eth)
 
 	eth->tx_events++;
 	if (likely(napi_schedule_prep(&eth->tx_napi))) {
-		mtk_tx_irq_disable(eth, MTK_TX_DONE_INT);
 		__napi_schedule(&eth->tx_napi);
+		mtk_tx_irq_disable(eth, MTK_TX_DONE_INT);
 	}
 
 	return IRQ_HANDLED;
@@ -4885,7 +4886,10 @@ static int mtk_probe(struct platform_device *pdev)
 	}
 
 	if (MTK_HAS_CAPS(eth->soc->caps, MTK_36BIT_DMA)) {
-		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(36));
+		err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(36));
+		if (!err)
+			err = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+
 		if (err) {
 			dev_err(&pdev->dev, "Wrong DMA config\n");
 			return -EINVAL;
