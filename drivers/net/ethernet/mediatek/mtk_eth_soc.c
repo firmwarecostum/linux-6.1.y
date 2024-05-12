@@ -475,30 +475,6 @@ static void mtk_setup_bridge_switch(struct mtk_eth *eth)
 		MTK_GSW_CFG);
 }
 
-static bool mtk_check_gmac23_idle(struct mtk_mac *mac)
-{
-	u32 mac_fsm, gdm_fsm;
-
-	mac_fsm = mtk_r32(mac->hw, MTK_MAC_FSM(mac->id));
-
-	switch (mac->id) {
-	case MTK_GMAC2_ID:
-		gdm_fsm = mtk_r32(mac->hw, MTK_FE_GDM2_FSM);
-		break;
-	case MTK_GMAC3_ID:
-		gdm_fsm = mtk_r32(mac->hw, MTK_FE_GDM3_FSM);
-		break;
-	default:
-		return true;
-	};
-
-	if ((mac_fsm & 0xFFFF0000) == 0x01010000 &&
-	    (gdm_fsm & 0xFFFF0000) == 0x00000000)
-		return true;
-
-	return false;
-}
-
 static struct phylink_pcs *mtk_mac_select_pcs(struct phylink_config *config,
 					      phy_interface_t interface)
 {
@@ -507,20 +483,12 @@ static struct phylink_pcs *mtk_mac_select_pcs(struct phylink_config *config,
 	struct mtk_eth *eth = mac->hw;
 	unsigned int sid;
 
-	if ((interface == PHY_INTERFACE_MODE_SGMII ||
-	     phy_interface_mode_is_8023z(interface)) &&
-	    MTK_HAS_CAPS(eth->soc->caps, MTK_SGMII)) {
-		sid = mtk_mac2xgmii_id(eth, mac->id);
-		if (MTK_HAS_CAPS(eth->soc->caps, MTK_USXGMII))
-			return mtk_sgmii_wrapper_select_pcs(eth, mac->id);
-		else
-			return eth->sgmii_pcs[sid];
-	} else if ((interface == PHY_INTERFACE_MODE_USXGMII ||
-		    interface == PHY_INTERFACE_MODE_10GBASER ||
-		    interface == PHY_INTERFACE_MODE_5GBASER) &&
-		   MTK_HAS_CAPS(eth->soc->caps, MTK_USXGMII) &&
-		   mac->id != MTK_GMAC1_ID) {
-		return mtk_usxgmii_select_pcs(eth, mac->id);
+	if (interface == PHY_INTERFACE_MODE_SGMII ||
+	    phy_interface_mode_is_8023z(interface)) {
+		sid = (MTK_HAS_CAPS(eth->soc->caps, MTK_SHARED_SGMII)) ?
+		       0 : mac->id;
+
+		return eth->sgmii_pcs[sid];
 	}
 
 	return NULL;
@@ -576,22 +544,7 @@ static void mtk_mac_config(struct phylink_config *config, unsigned int mode,
 					goto init_err;
 			}
 			break;
-		case PHY_INTERFACE_MODE_USXGMII:
-		case PHY_INTERFACE_MODE_10GBASER:
-		case PHY_INTERFACE_MODE_5GBASER:
-			if (MTK_HAS_CAPS(eth->soc->caps, MTK_USXGMII)) {
-				err = mtk_gmac_usxgmii_path_setup(eth, mac->id);
-				if (err)
-					goto init_err;
-			}
-			break;
 		case PHY_INTERFACE_MODE_INTERNAL:
-			if (mac->id == MTK_GMAC2_ID &&
-			    MTK_HAS_CAPS(eth->soc->caps, MTK_2P5GPHY)) {
-				err = mtk_gmac_2p5gphy_path_setup(eth, mac->id);
-				if (err)
-					goto init_err;
-			}
 			break;
 		default:
 			goto err_phy;
@@ -646,6 +599,8 @@ static void mtk_mac_config(struct phylink_config *config, unsigned int mode,
 		val &= ~SYSCFG0_GE_MODE(SYSCFG0_GE_MASK, mac->id);
 		val |= SYSCFG0_GE_MODE(ge_mode, mac->id);
 		regmap_write(eth->ethsys, ETHSYS_SYSCFG0, val);
+
+		mac->interface = state->interface;
 	}
 
 	/* SGMII */
@@ -662,39 +617,20 @@ static void mtk_mac_config(struct phylink_config *config, unsigned int mode,
 
 		/* Save the syscfg0 value for mac_finish */
 		mac->syscfg0 = val;
-	} else if (state->interface != PHY_INTERFACE_MODE_USXGMII &&
-		   state->interface != PHY_INTERFACE_MODE_10GBASER &&
-		   state->interface != PHY_INTERFACE_MODE_5GBASER &&
-		   phylink_autoneg_inband(mode)) {
+	} else if (phylink_autoneg_inband(mode)) {
 		dev_err(eth->dev,
-			"In-band mode not supported in non-SerDes modes!\n");
+			"In-band mode not supported in non SGMII mode!\n");
 		return;
 	}
 
 	/* Setup gmac */
-	if (mtk_is_netsys_v3_or_greater(eth)) {
-		if (mtk_interface_mode_is_xgmii(state->interface)) {
-			mtk_w32(mac->hw, MTK_GDMA_XGDM_SEL, MTK_GDMA_EG_CTRL(mac->id));
-			mtk_w32(mac->hw, MAC_MCR_FORCE_LINK_DOWN, MTK_MAC_MCR(mac->id));
+	if (mtk_is_netsys_v3_or_greater(eth) &&
+	    mac->interface == PHY_INTERFACE_MODE_INTERNAL) {
+		mtk_w32(mac->hw, MTK_GDMA_XGDM_SEL, MTK_GDMA_EG_CTRL(mac->id));
+		mtk_w32(mac->hw, MAC_MCR_FORCE_LINK_DOWN, MTK_MAC_MCR(mac->id));
 
-			if (mac->id == MTK_GMAC1_ID)
-				mtk_setup_bridge_switch(eth);
-		} else {
-			mtk_w32(eth, 0, MTK_GDMA_EG_CTRL(mac->id));
-
-			/* FIXME: In current hardware design, we have to reset FE
-			 * when swtiching XGDM to GDM. Therefore, here trigger an SER
-			 * to let GDM go back to the initial state.
-			 */
-			if ((mtk_interface_mode_is_xgmii(mac->interface) ||
-			     mac->interface == PHY_INTERFACE_MODE_NA) &&
-			    !mtk_check_gmac23_idle(mac) &&
-			    !test_bit(MTK_RESETTING, &eth->state))
-				schedule_work(&eth->pending_work);
-		}
+		mtk_setup_bridge_switch(eth);
 	}
-
-	mac->interface = state->interface;
 
 	return;
 
@@ -726,8 +662,7 @@ static int mtk_mac_finish(struct phylink_config *config, unsigned int mode,
 	mcr_cur = mtk_r32(mac->hw, MTK_MAC_MCR(mac->id));
 	mcr_new = mcr_cur;
 	mcr_new |= MAC_MCR_IPG_CFG | MAC_MCR_FORCE_MODE |
-		   MAC_MCR_BACKOFF_EN | MAC_MCR_BACKPR_EN | MAC_MCR_FORCE_LINK |
-		   MAC_MCR_RX_FIFO_CLR_DIS;
+		   MAC_MCR_BACKOFF_EN | MAC_MCR_BACKPR_EN | MAC_MCR_RX_FIFO_CLR_DIS;
 
 	/* Only update control register when needed! */
 	if (mcr_new != mcr_cur)
@@ -741,13 +676,10 @@ static void mtk_mac_link_down(struct phylink_config *config, unsigned int mode,
 {
 	struct mtk_mac *mac = container_of(config, struct mtk_mac,
 					   phylink_config);
+	u32 mcr = mtk_r32(mac->hw, MTK_MAC_MCR(mac->id));
 
-	if (!mtk_interface_mode_is_xgmii(interface)) {
-		mtk_m32(mac->hw, MAC_MCR_TX_EN | MAC_MCR_RX_EN, 0, MTK_MAC_MCR(mac->id));
-		mtk_m32(mac->hw, MTK_XGMAC_FORCE_LINK(mac->id), 0, MTK_XGMAC_STS(mac->id));
-	} else if (mac->id != MTK_GMAC1_ID) {
-		mtk_m32(mac->hw, XMAC_MCR_TRX_DISABLE, XMAC_MCR_TRX_DISABLE, MTK_XMAC_MCR(mac->id));
-	}
+	mcr &= ~(MAC_MCR_TX_EN | MAC_MCR_RX_EN | MAC_MCR_FORCE_LINK);
+	mtk_w32(mac->hw, mcr, MTK_MAC_MCR(mac->id));
 }
 
 static void mtk_set_queue_speed(struct mtk_eth *eth, unsigned int idx,
@@ -819,11 +751,13 @@ static void mtk_set_queue_speed(struct mtk_eth *eth, unsigned int idx,
 	mtk_w32(eth, val, soc->reg_map->qdma.qtx_sch + ofs);
 }
 
-static void mtk_gdm_mac_link_up(struct mtk_mac *mac,
-				struct phy_device *phy,
-				unsigned int mode, phy_interface_t interface,
-				int speed, int duplex, bool tx_pause, bool rx_pause)
+static void mtk_mac_link_up(struct phylink_config *config,
+			    struct phy_device *phy,
+			    unsigned int mode, phy_interface_t interface,
+			    int speed, int duplex, bool tx_pause, bool rx_pause)
 {
+	struct mtk_mac *mac = container_of(config, struct mtk_mac,
+					   phylink_config);
 	u32 mcr;
 
 	mcr = mtk_r32(mac->hw, MTK_MAC_MCR(mac->id));
@@ -853,57 +787,8 @@ static void mtk_gdm_mac_link_up(struct mtk_mac *mac,
 	if (rx_pause)
 		mcr |= MAC_MCR_FORCE_RX_FC;
 
-	mcr |= MAC_MCR_TX_EN | MAC_MCR_RX_EN;
+	mcr |= MAC_MCR_TX_EN | MAC_MCR_RX_EN | MAC_MCR_FORCE_LINK;
 	mtk_w32(mac->hw, mcr, MTK_MAC_MCR(mac->id));
-}
-
-static void mtk_xgdm_mac_link_up(struct mtk_mac *mac,
-				 struct phy_device *phy,
-				 unsigned int mode, phy_interface_t interface,
-				 int speed, int duplex, bool tx_pause, bool rx_pause)
-{
-	u32 mcr, force_link = 0;
-
-	if (mac->id == MTK_GMAC1_ID)
-		return;
-
-	/* Eliminate the interference(before link-up) caused by PHY noise */
-	mtk_m32(mac->hw, XMAC_LOGIC_RST, 0, MTK_XMAC_LOGIC_RST(mac->id));
-	mdelay(20);
-	mtk_m32(mac->hw, XMAC_GLB_CNTCLR, XMAC_GLB_CNTCLR, MTK_XMAC_CNT_CTRL(mac->id));
-
-	if (mac->interface == PHY_INTERFACE_MODE_INTERNAL || mac->id == MTK_GMAC3_ID)
-		force_link = MTK_XGMAC_FORCE_LINK(mac->id);
-
-	mtk_m32(mac->hw, MTK_XGMAC_FORCE_LINK(mac->id), force_link, MTK_XGMAC_STS(mac->id));
-
-	mcr = mtk_r32(mac->hw, MTK_XMAC_MCR(mac->id));
-	mcr &= ~(XMAC_MCR_FORCE_TX_FC | XMAC_MCR_FORCE_RX_FC | XMAC_MCR_TRX_DISABLE);
-	/* Configure pause modes -
-	 * phylink will avoid these for half duplex
-	 */
-	if (tx_pause)
-		mcr |= XMAC_MCR_FORCE_TX_FC;
-	if (rx_pause)
-		mcr |= XMAC_MCR_FORCE_RX_FC;
-
-	mtk_w32(mac->hw, mcr, MTK_XMAC_MCR(mac->id));
-}
-
-static void mtk_mac_link_up(struct phylink_config *config,
-			    struct phy_device *phy,
-			    unsigned int mode, phy_interface_t interface,
-			    int speed, int duplex, bool tx_pause, bool rx_pause)
-{
-	struct mtk_mac *mac = container_of(config, struct mtk_mac,
-					   phylink_config);
-
-	if (mtk_interface_mode_is_xgmii(interface))
-		mtk_xgdm_mac_link_up(mac, phy, mode, interface, speed, duplex,
-				     tx_pause, rx_pause);
-	else
-		mtk_gdm_mac_link_up(mac, phy, mode, interface, speed, duplex,
-				    tx_pause, rx_pause);
 }
 
 static const struct phylink_mac_ops mtk_phylink_ops = {
@@ -4731,20 +4616,7 @@ static int mtk_add_mac(struct mtk_eth *eth, struct device_node *np)
 		phy_interface_zero(mac->phylink_config.supported_interfaces);
 		__set_bit(PHY_INTERFACE_MODE_INTERNAL,
 			  mac->phylink_config.supported_interfaces);
-	} else if (MTK_HAS_CAPS(mac->hw->soc->caps, MTK_USXGMII)) {
-		mac->phylink_config.mac_capabilities |= MAC_5000FD | MAC_10000FD;
-		__set_bit(PHY_INTERFACE_MODE_5GBASER,
-			  mac->phylink_config.supported_interfaces);
-		__set_bit(PHY_INTERFACE_MODE_10GBASER,
-			  mac->phylink_config.supported_interfaces);
-		__set_bit(PHY_INTERFACE_MODE_USXGMII,
-			  mac->phylink_config.supported_interfaces);
 	}
-
-	if (MTK_HAS_CAPS(mac->hw->soc->caps, MTK_2P5GPHY) &&
-	    id == MTK_GMAC2_ID)
-		__set_bit(PHY_INTERFACE_MODE_INTERNAL,
-			  mac->phylink_config.supported_interfaces);
 
 	phylink = phylink_create(&mac->phylink_config,
 				 of_fwnode_handle(mac->of_node),
@@ -4938,13 +4810,6 @@ static int mtk_probe(struct platform_device *pdev)
 
 	if (MTK_HAS_CAPS(eth->soc->caps, MTK_SGMII)) {
 		err = mtk_sgmii_init(eth);
-
-		if (err)
-			return err;
-	}
-
-	if (MTK_HAS_CAPS(eth->soc->caps, MTK_USXGMII)) {
-		err = mtk_usxgmii_init(eth);
 
 		if (err)
 			return err;

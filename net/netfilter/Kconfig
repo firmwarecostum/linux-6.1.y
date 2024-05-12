@@ -735,7 +735,6 @@ config NF_FLOW_TABLE
 	tristate "Netfilter flow table module"
 	depends on NETFILTER_INGRESS
 	depends on NF_CONNTRACK
-	depends on NF_TABLES
 	help
 	  This option adds the flow table core infrastructure.
 
